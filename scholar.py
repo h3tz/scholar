@@ -167,6 +167,7 @@ import re
 import sys
 import warnings
 import ssl
+import pandas as pd
 
 try:
     # Try importing for Python 3
@@ -242,7 +243,7 @@ class ScholarConf(object):
 
     VERSION = '2.10'
     LOG_LEVEL = 1
-    MAX_PAGE_RESULTS = 10 # Current default for per-page results
+    MAX_PAGE_RESULTS = 1000 # Current default for per-page results
     SCHOLAR_SITE = 'https://scholar.google.com'
 
     # USER_AGENT = 'Mozilla/5.0 (X11; U; FreeBSD i386; en-US; rv:1.9.2.9) Gecko/20100913 Firefox/3.6.9'
@@ -357,6 +358,7 @@ class ScholarArticle(object):
         """
         return self.citation_data or ''
 
+allUrlToQuery = []
 
 class ScholarArticleParser(object):
     """
@@ -369,6 +371,7 @@ class ScholarArticleParser(object):
         self.article = None
         self.site = site or ScholarConf.SCHOLAR_SITE
         self.year_re = re.compile(r'\b(?:20|19)\d{2}\b')
+
 
     def handle_article(self, art):
         """
@@ -397,9 +400,19 @@ class ScholarArticleParser(object):
         # Now parse out listed articles:
         for div in self.soup.findAll(ScholarArticleParser._tag_results_checker):
             self._parse_article(div)
-            self._clean_article()
+            #self._clean_article()
             if self.article['title']:
                 self.handle_article(self.article)
+
+        if len(allUrlToQuery) == 0:
+            for div in self.soup.find_all("div", {"id": "gs_nml"}):
+                for nextpage in div.contents:
+                    try:
+                        allUrlToQuery.append(nextpage.attrs['href'])
+                    except:
+                        pass
+        pass
+
 
     def _clean_article(self):
         """
@@ -507,6 +520,9 @@ class ScholarArticleParser(object):
             res = res.split()
         return klass in res
 
+    def _tag_results_lists(tag):
+        return tag.name == 'div' \
+            and ScholarArticleParser._tag_has_class(tag, 'gs_nml')
     @staticmethod
     def _tag_results_checker(tag):
         return tag.name == 'div' \
@@ -1032,12 +1048,41 @@ class ScholarQuerier(object):
         ScholarUtils.log('info', 'settings applied')
         return True
 
+    def send_queryAllPages(self, query):
+        """
+        This method initiates a search query (a ScholarQuery instance)
+        with subsequent parsing of the response.
+        """
+        self.query = query
+
+        html = self._get_http_response(url=query.get_url(),
+                                       log_msg='dump of query response HTML',
+                                       err_msg='results retrieval failed')
+        if html is None:
+            return
+
+        self.parse(html)
+
+        breakCounter = 0;
+        for urlToQuery in allUrlToQuery:
+            if breakCounter == 1:
+                break
+
+            html = self._get_http_response(url=f'https://scholar.google.com{urlToQuery}',
+                                           log_msg='dump of query response HTML',
+                                           err_msg='results retrieval failed')
+            if html is None:
+                return
+
+            self.parse(html)
+            breakCounter = breakCounter + 1
+        pass
     def send_query(self, query):
         """
         This method initiates a search query (a ScholarQuery instance)
         with subsequent parsing of the response.
         """
-        self.clear_articles()
+        #self.clear_articles()
         self.query = query
 
         html = self._get_http_response(url=query.get_url(),
@@ -1080,6 +1125,9 @@ class ScholarQuerier(object):
         self.get_citation_data(art)
         self.articles.append(art)
 
+    def get_article_most_cit(self):
+        pass
+
     def clear_articles(self):
         """Clears any existing articles stored from previous queries."""
         self.articles = []
@@ -1110,7 +1158,7 @@ class ScholarQuerier(object):
             err_msg = 'request failed'
         try:
             ScholarUtils.log('info', 'requesting %s' % unquote(url))
-
+            #url = "https://scholar.google.com/scholar?start=40&q=sdn&hl=de&as_sdt=2022"
             req = Request(url=url, headers={'User-Agent': ScholarConf.USER_AGENT})
             hdl = self.opener.open(req)
             html = hdl.read()
@@ -1165,6 +1213,13 @@ def citation_export(querier):
     articles = querier.articles
     for art in articles:
         print(art.as_citation() + b'\n')
+
+def writetoCSV(querier):
+    writer = pd.ExcelWriter('path/to/output')
+
+    df1 = pd.DataFrame(querier.articles)
+    df1.to_excel(writer, sheet_name='Sheet 1', index=False)
+    writer.save()
 
 def citation_export_str(querier):
     articles = querier.articles
@@ -1226,10 +1281,13 @@ scholar.py -c 5 -a "albert einstein" -t --none "quantum theory" --after 1970"""
                      help='Like --txt, but first print global results too')
     group.add_option('--csv', action='store_true',
                      help='Print article data in CSV form (separator is "|")')
+    group.add_option('--csvWrite', action='store_true',
+                     help='Write to CSVFile (separator is "|")')
     group.add_option('--csv-header', action='store_true',
                      help='Like --csv, but print header with column names')
     group.add_option('--citation', metavar='FORMAT', default=None,
                      help='Print article details in standard citation format. Argument Must be one of "bt" (BibTeX), "en" (EndNote), "rm" (RefMan), or "rw" (RefWorks).')
+    group.add_option('--sort', action='store_true', default=False,help='Sort results')
     parser.add_option_group(group)
 
     group = optparse.OptionGroup(parser, 'Miscellaneous')
@@ -1315,7 +1373,9 @@ scholar.py -c 5 -a "albert einstein" -t --none "quantum theory" --after 1970"""
         options.count = min(options.count, ScholarConf.MAX_PAGE_RESULTS)
         query.set_num_page_results(options.count)
 
-    querier.send_query(query)
+    querier.send_queryAllPages(query)
+    #querier.sort_article_most_cit()
+
 
     if options.csv:
         csv(querier)
@@ -1324,7 +1384,7 @@ scholar.py -c 5 -a "albert einstein" -t --none "quantum theory" --after 1970"""
     elif options.citation is not None:
         citation_export(querier)
     else:
-        txt(querier, with_globals=options.txt_globals)
+        txt(querier, with_globals=options.sort)
 
     if options.cookie_file:
         querier.save_cookies()
