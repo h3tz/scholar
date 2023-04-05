@@ -162,12 +162,19 @@ page. It is not a recursive crawler.
 # POSSIBILITY OF SUCH DAMAGE.
 
 import optparse
-import os
 import re
 import sys
 import warnings
 import ssl
-import pandas as pd
+import time
+from os import path
+
+import matplotlib.pyplot as plt
+import os
+import csv
+print(sys.executable)
+
+from wordcloud import WordCloud, STOPWORDS
 
 try:
     # Try importing for Python 3
@@ -426,7 +433,7 @@ class ScholarArticleParser(object):
     def _parse_globals(self):
         tag = self.soup.find(name='div', attrs={'id': 'gs_ab_md'})
         if tag is not None:
-            raw_text = tag.findAll(text=True)
+            raw_text = tag.findAll(string=True)
             # raw text is a list because the body contains <b> etc
             if raw_text is not None and len(raw_text) > 0:
                 try:
@@ -623,7 +630,7 @@ class ScholarArticleParser190528(ScholarArticleParser):
                 # We now distinguish the two.
                 try:
                     atag = tag.h3.a
-                    self.article['title'] = ''.join(atag.findAll(text=True))
+                    self.article['title'] = ''.join(atag.findAll(string=True))
                     self.article['url'] = self._path2url(atag['href'])
                     if self.article['url'].endswith('.pdf'):
                         self.article['url_pdf'] = self.article['url']
@@ -631,7 +638,7 @@ class ScholarArticleParser190528(ScholarArticleParser):
                     # Remove a few spans that have unneeded content (e.g. [CITATION])
                     for span in tag.h3.findAll(name='span'):
                         span.clear()
-                    self.article['title'] = ''.join(tag.h3.findAll(text=True))
+                    self.article['title'] = ''.join(tag.h3.findAll(string=True))
 
                 if tag.find('div', {'class': 'gs_a'}):
                     year = self.year_re.findall(tag.find('div', {'class': 'gs_a'}).text)
@@ -642,7 +649,7 @@ class ScholarArticleParser190528(ScholarArticleParser):
 
                 if tag.find('div', {'class': 'gs_rs'}):
                     # These are the content excerpts rendered into the results.
-                    raw_text = tag.find('div', {'class': 'gs_rs'}).findAll(text=True)
+                    raw_text = tag.find('div', {'class': 'gs_rs'}).findAll(string=True)
                     if len(raw_text) > 0:
                         raw_text = ''.join(raw_text)
                         raw_text = raw_text.replace('\n', '')
@@ -1048,7 +1055,7 @@ class ScholarQuerier(object):
         ScholarUtils.log('info', 'settings applied')
         return True
 
-    def send_queryAllPages(self, query):
+    def send_queryAllPages(self, query,stopAfter):
         """
         This method initiates a search query (a ScholarQuery instance)
         with subsequent parsing of the response.
@@ -1064,8 +1071,9 @@ class ScholarQuerier(object):
         self.parse(html)
 
         breakCounter = 0;
+
         for urlToQuery in allUrlToQuery:
-            if breakCounter == 1:
+            if breakCounter == stopAfter:
                 break
 
             html = self._get_http_response(url=f'https://scholar.google.com{urlToQuery}',
@@ -1076,6 +1084,7 @@ class ScholarQuerier(object):
 
             self.parse(html)
             breakCounter = breakCounter + 1
+            time.sleep(1)
         pass
     def send_query(self, query):
         """
@@ -1202,17 +1211,48 @@ def txt(querier, with_globals):
     for art in articles:
         print(encode(art.as_txt()) + '\n')
 
-def csv(querier, header=False, sep='|'):
+def csv(querier, searchkey, yearAfter):
     articles = querier.articles
+    timestr = time.strftime("%Y%m%d-%H%M")
+    filename = f"{searchkey}_{timestr}_after_{yearAfter}.csv"
+    f = open(filename,'w', encoding="utf-8")
     for art in articles:
-        result = art.as_csv(header=header, sep=sep)
-        print(encode(result))
-        header = False
+        try:
+            result = art.as_csv(header=False, sep='|')
+            result = encode(result)
+            f.write(result)
+            f.write('\n')
+            print(encode(result))
+            header = False
+        except:
+            pass
 
 def citation_export(querier):
     articles = querier.articles
     for art in articles:
         print(art.as_citation() + b'\n')
+
+def getWordCloudStringAll(querier):
+
+    listOfArticels = []
+    excerpt = []
+    longString = ""
+    for art in querier.articles:
+        listOfArticels.append(art["title"])
+        excerpt.append(art["excerpt"])
+        longString = longString + art["title"] + " " + art["excerpt"] + " "
+
+    return longString
+
+def getWordCloudStringTitel(querier):
+
+    listOfArticels = []
+    longString = ""
+    for art in querier.articles:
+        listOfArticels.append(art["title"])
+        longString = longString + art["title"] + " "
+
+    return longString
 
 def writetoCSV(querier):
     writer = pd.ExcelWriter('path/to/output')
@@ -1271,6 +1311,8 @@ scholar.py -c 5 -a "albert einstein" -t --none "quantum theory" --after 1970"""
                      help='Do not search, just use articles in given cluster ID')
     group.add_option('-c', '--count', type='int', default=None,
                      help='Maximum number of results')
+    group.add_option('-w', '--wordcloud', type='int', default=None,
+                     help='Prepares a word cloud')
     parser.add_option_group(group)
 
     group = optparse.OptionGroup(parser, 'Output format',
@@ -1373,12 +1415,11 @@ scholar.py -c 5 -a "albert einstein" -t --none "quantum theory" --after 1970"""
         options.count = min(options.count, ScholarConf.MAX_PAGE_RESULTS)
         query.set_num_page_results(options.count)
 
-    querier.send_queryAllPages(query)
-    #querier.sort_article_most_cit()
+    querier.send_queryAllPages(query,10)
 
 
     if options.csv:
-        csv(querier)
+        csv(querier,options.phrase, options.after)
     elif options.csv_header:
         csv(querier, header=True)
     elif options.citation is not None:
@@ -1386,10 +1427,46 @@ scholar.py -c 5 -a "albert einstein" -t --none "quantum theory" --after 1970"""
     else:
         txt(querier, with_globals=options.sort)
 
+    if options.wordcloud:
+
+        #prepare wordcloudString
+        createWorldCloud_allWords(querier, options.phrase, 150, options.after)
+        createWorldCloud_allWords(querier, options.phrase, 50, options.after)
+        createWorldCloud_allWords(querier, options.phrase, 25, options.after)
+
     if options.cookie_file:
         querier.save_cookies()
 
     return 0
+
+
+def createWorldCloud_allWords(querier, searchkey,max_words, yearAfter):
+    allWords = getWordCloudStringTitel(querier)
+    stopwords = set(STOPWORDS)
+    stopwords.update(["using", "network"])
+    # Read the whole text.
+    # text = open(path.join(d, 'input_text.txt')).read()
+    text = allWords
+    print(len(allWords))
+    # get data directory (using getcwd() is needed to support running example in generated IPython notebook)
+    d = path.dirname(__file__) if "__file__" in locals() else os.getcwd()
+    # Generate a word cloud image
+    wordcloud = WordCloud(width=800,
+                          height=800,
+                          max_font_size=120,
+                          max_words=max_words,
+                          random_state=123,
+                          stopwords=stopwords).generate(text)
+    # Display the generated image:
+    # the matplotlib way:
+    plt.imshow(wordcloud, interpolation='bilinear')
+    plt.axis("off")
+
+    timestr = time.strftime("%Y%m%d-%H%M")
+    filename = f"{searchkey}_{str(max_words)}_{timestr}_after_{yearAfter}.png"
+    plt.savefig(filename)
+    #plt.show()
+
 
 if __name__ == "__main__":
     sys.exit(main())
